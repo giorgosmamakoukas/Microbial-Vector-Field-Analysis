@@ -10,24 +10,30 @@ import torch
 import torch.nn as nn
 import pdb
 
-# Step 1: read the datafile
-# We need metadata for later (removing sequences with large time gaps, interpolation, prevent crossing patients)
-# only run once
-# Results alr saved in np_data.pickle
-def read_data(filename, pickle_name):
+def read_excel_and_pickle(filename, pickle_name):
+    """Reads data from an Excel file and pickles it. Metadata is used for removing sequences with large time gaps, interpolation, prevent crossing patients, etc.)
+
+    Args:
+        filename (str): the name of the Excel file to read from
+        pickle_name (str): the name of the pickle file to save the data to
+    """
     all_data = pd.read_excel(filename)
-    blast_data_and_metadata = all_data.iloc[:,1:19]
+    blast_data_and_metadata = all_data.iloc[:,1:19] # TODO Magic number
     np_data_and_metadata = np.array(blast_data_and_metadata)
 
     with open(pickle_name,'wb') as f:
         pickle.dump(np_data_and_metadata, f)
 
-# Step 2: Data modifications
-# Clear rows of all nan values (some weird data error)
-# Clear duplicate rows
-# Average in 1 blank gaps
-# Again, only run once and then just store in binary
 def data_modifications(data_array):
+    """Clears rows of all nan values, duplicate rows, average in 1 blank gaps
+
+    Args:
+        data_array (np.ndarray): Input array to be cleaned. It is assumed to have the following shape: (n_samples, n_features), where the first 3 features are metadata (year, patient number, day of sampling) and the remaining features represent bacterial values.
+
+    Returns:
+        np.ndarray: Cleaned numpy array. The same shape as the input array, with rows containing nan values removed and duplicated rows removed. Additionally, rows that are 1 day apart and have the same metadata (year and patient number) are averaged and inserted between them.
+    """
+
     new_data_array = data_array.copy()
     # remove all rows with nan values
     # isnan only works on floats and ints so we first take those values and then check for nans
@@ -63,12 +69,36 @@ def data_modifications(data_array):
     new_data_array = np.insert(new_data_array, insertion_indices_array, insertion_values_array, 0)
     return new_data_array
 
-# Step 3: Making training sequences out of our data
-# Make sequences of 15 (14 in, 1 out) continguous time points (with same metadata: patient number and year)
-# Make sequences of 28 (14 ,14) contigous time points (with same metadata) for testing
+# TODO Check if following functions are correct
+def metadata_check(seq):
+    return all([x==seq[0, 0] for x in seq[:, 0]]) and all([x==seq[0, 1] for x in seq[:, 1]])
+
+def is_contiguous(seq):
+    return seq[0, 2] == (seq[-1, 2] - len(seq) + 1) # TODO Magic numbers, remove
+
+def get_sequences(data_array, window_size):
+    sequences = []
+    for ind in range(len(data_array)-window_size+1):
+        seq = data_array[ind:ind+window_size, :]
+        if metadata_check(seq) and is_contiguous(seq):
+            sequences.append(seq)
+    return sequences
+
 def generate_training_and_testing_sequences(data_array):
+    """Generate training sequences out of data. 
+    Make sequences of 15 (14 in, 1 out) continguous time points (with same metadata: patient number and year)
+    Make sequences of 28 (14 ,14) contigous time points (with same metadata) for testing
+
+    Args:
+        data_array (np.ndarray): _description_
+
+    Returns:
+        tuple(np.ndarray, np.ndarray): Training and testing datasets
+    """
     training_seqs = []
 
+
+    # TODO Remove duplicate code and make modular
     for ind in range(len(data_array)-14):
         seq = data_array[ind:ind+15, :]
         # metadata check (same patient # and year)
@@ -84,26 +114,41 @@ def generate_training_and_testing_sequences(data_array):
         seq = data_array[ind2:ind2+28, :]
         # metadata check (same patient # and year)
         if all([x==seq[0, 0] for x in seq[:, 0]]) and (all([x==seq[0, 1] for x in seq[:, 1]])):
-            x = seq[0,2]
-            y = seq[-1,2]
+            x = seq[0,2] # TODO Why is x and y used here and not in training set?
+            y = seq[-1,2] 
             # check for contigous sequence
             if (seq[0, 2] == (seq[-1, 2]-27)):
                 testing_seqs.append(seq)
 
+    # training_seqs = get_sequences(data_array, 15)
+    # testing_seqs = get_sequences(data_array, 28)
+
     return training_seqs, testing_seqs
 
-# Step 4: Pick testing sequence and throw out training sequences with overlap
-# Only function to actually run on each run of NN (will be run in the lstm_main.py file)
-# Also applies MinMax scaler and sets up data in tensorized format
 def setup_testing(training_seqs, testing_seqs, testing_traj_index, device):
+    """Picks testing sequence and throw out training sequences with overlap
+    Only function to actually run on each run of NN (will be run in the lstm_main.py file)
+    Also applies MinMax scaler and sets up data in tensorized format
+    
+    Args:
+        training_seqs (_type_): _description_
+        testing_seqs (_type_): _description_
+        testing_traj_index (_type_): _description_
+        device (_type_): _description_
+
+    Returns:
+        tuple(TensorDataset, list, FloatTensor, FloatTensor): _description_
+    """
     testing_seq = testing_seqs[testing_traj_index]
     test_IDs = []
+
     for i in range(len(testing_seq)):
         temp = ''.join(testing_seq[i,0:2])
         test_IDs.append(temp+str(testing_seq[i,2]))
     filtered_training_seqs = []
+
+    # TODO Move to a different function
     for training_seq in training_seqs:
-        flag = True
         train_IDs = []
         for i in range(len(training_seq)):
             temp = ''.join(training_seq[i,0:2])
@@ -132,12 +177,8 @@ def setup_testing(training_seqs, testing_seqs, testing_traj_index, device):
     tensor_training_data = torch.empty((num_traj, num_timesteps, num_inputs),dtype=float)
     tensor_label_data = torch.empty((num_traj, num_inputs),dtype=torch.float)
 
-    for i in range(num_traj):
-        tensor_training_data[i, :, :] = torch.FloatTensor(np_filtered_training_seqs[i, :-1, :])
-        tensor_label_data[i] = torch.FloatTensor(np_filtered_training_seqs[i, -1, :])
-
-    # print('Training Size', tensor_training_data.shape)
-    # print('Training Label Size:', tensor_label_data.shape)
+    tensor_training_data = torch.FloatTensor(np_filtered_training_seqs[:, :-1, :])
+    tensor_label_data = torch.FloatTensor(np_filtered_training_seqs[:, -1, :])
 
     # Make dataloader and testing tensors
     trainingData = TensorDataset(tensor_training_data, tensor_label_data)
@@ -149,7 +190,7 @@ def setup_testing(training_seqs, testing_seqs, testing_traj_index, device):
 
 if __name__=='__main__':
     # # running first function for data reading
-    # read_data("VMBData_clean.xlsx", 'np_data.pickle')
+    # read_excel_and_pickle("VMBData_clean.xlsx", 'np_data.pickle')
 
     # # running second function for data modifs
     # with open('np_data.pickle', 'rb') as f:
