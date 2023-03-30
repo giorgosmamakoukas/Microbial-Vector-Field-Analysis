@@ -1,3 +1,7 @@
+# TODOs
+- requirements.txt with python libraries needed to run end-to-end the analysis
+
+
 # LSTM for the Human Microbiome
 This project uses an LSTM RNN approach to predict microbial profiles from prior timepoint. In this specific example, we are using data from:
 
